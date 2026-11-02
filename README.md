@@ -1,303 +1,190 @@
-<p align="center">
-  <h1 align="center">🤖 MultiAgent-Search</h1>
-  <p align="center"><b>轻量级多智能体协作系统 —— AI Agent 开发入门实战项目</b></p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
-    <img src="https://img.shields.io/badge/FastAPI-0.129-green.svg" alt="FastAPI">
-    <img src="https://img.shields.io/badge/LangGraph-1.0-orange.svg" alt="LangGraph">
-    <img src="https://img.shields.io/badge/deepagents-0.4-purple.svg" alt="deepagents">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
-    <img src="https://img.shields.io/badge/适合-学习练手-brightgreen.svg" alt="learning">
-  </p>
-</p>
+# 网球训练 Agent
+
+上传一段击球视频，得到动作指标、短板诊断、训练计划，以及和自己上次的对比。
+
+一个**用 CV 做动作量化、用 Agent 做编排**的项目：数字来自代码，模型只负责决定调什么工具、怎么表达。
 
 ---
 
-## 🎯 这是什么
+## 先说不做什么
 
-一个 **不到 1000 行代码** 的 AI Agent 学习项目。用最精简的方式展示如何基于 LangChain 生态构建**多智能体协作系统** — 一个"主智能体"像团队负责人一样调度三个"子智能体"（网络搜索、数据库查询、知识库检索）协同完成复杂任务。
+诚实的边界比功能列表更能说明项目成熟度：
 
-**如果你是这样的人，这项目就是为你准备的 👇**
-
-- 正在学 LangChain / LangGraph，想找一个**完整、能跑**的实战项目
-- 对"多智能体编排"感兴趣，但不想一上来就看复杂的 AutoGPT / CrewAI 源码
-- 想理解 **FastAPI + WebSocket + Agent** 怎么组合成一个真实可用的系统
-- 面试前需要一个 AI Agent 项目充实简历，并且能讲清楚每个设计决策
+- **不是诊断工具。** 指标没有教练标注做 ground truth，只能保证"可复现"，不能保证"能区分好坏动作"。
+- **不是实时系统。** 单段视频离线分析，约 40 秒。
+- **不是通用网球助手。** 知识库 43 条自建语料，覆盖不到的问题会明说"未收录"，不编。
 
 ---
 
-## 🏗️ 架构
+## 能力
 
-### 整体架构图
+| 能力 | 说明 |
+|---|---|
+| 动作分析 | MediaPipe 33 关键点 → 腕速峰值切分击球 → 5 项体高归一化指标，产出标注视频与关键帧 |
+| 纵向对比 | SQLite 持久化训练记录，按 `user_id` 隔离，对比首次与最近的指标稳定性（CV） |
+| 训练计划 | 按 CV 排名定位最不稳定的指标，生成分周计划；短板由代码判定，模型只负责组织语言 |
+| 知识问答 | 43 条自建知识库（技术动作 + 比赛规则），纯 Python BM25，回答强制标注出处 |
+| 装备推荐 | 8 款球拍，硬约束过滤 + 多目标打分 |
 
-```mermaid
-graph TD
-    U[👤 用户浏览器] -->|POST /api/task| S[FastAPI Server]
-    U <-->|WebSocket /ws/:id| S
-    S -->|asyncio.create_task| MA[主智能体 Orchestrator]
-    MA -->|调度| SA1[子智能体 1<br/>网络搜索]
-    MA -->|调度| SA2[子智能体 2<br/>数据库查询]
-    MA -->|调度| SA3[子智能体 3<br/>RAG知识库]
-    SA1 -->|Tavily API| W[🌐 互联网]
-    SA2 -->|MySQL| D[(数据库)]
-    SA3 -->|RAGFlow SDK| R[📚 知识库]
-    MA -->|生成| MD[Markdown 报告]
-    MD -->|转换| PDF[PDF 文件]
-    S -->|实时推送进度| U
+编排：主调度器 + 2 个子智能体（技术分析师 4 工具 / 装备顾问 1 工具），星型拓扑，子图独立编译、上下文隔离。
 
-    style MA fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style SA1 fill:#fff3e0,stroke:#f57c00
-    style SA2 fill:#e8f5e9,stroke:#388e3c
-    style SA3 fill:#fce4ec,stroke:#c62828
+```
+                 ┌──────────────┐
+   用户 ────────►│  主调度器     │
+                 └──────┬───────┘
+              task() ┌──┴───────────────┐ task()
+                     ▼                  ▼
+            ┌─────────────────┐  ┌─────────────┐
+            │  技术分析师      │  │  装备顾问    │
+            │ analyze_stroke  │  │ filter_     │
+            │ get_progress    │  │  rackets    │
+            │ make_training_  │  └─────────────┘
+            │   plan          │
+            │ search_technique│
+            └─────────────────┘
 ```
 
-### 请求流程图
+工具统一返回结构化结果，上层用代码校验而不是解析自然语言：
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant S as Server (FastAPI)
-    participant M as Monitor (WebSocket)
-    participant A as 主智能体
-    participant T1 as 子智能体 (搜索)
-    participant T2 as 子智能体 (数据库)
-
-    U->>S: POST /api/task {query}
-    S->>S: 生成 thread_id
-    S-->>U: {status:"started", thread_id}
-    S->>A: asyncio.create_task(agent)
-
-    U->>M: WebSocket 连接 /ws/{thread_id}
-
-    A->>M: "正在分析需求..."
-    M-->>U: 实时推送
-
-    A->>T1: "搜索最新AI动态"
-    T1->>M: "调用网络搜索工具..."
-    M-->>U: 实时推送
-    T1-->>A: 搜索结果
-
-    A->>T2: "查询历史数据"
-    T2->>M: "执行SQL查询..."
-    M-->>U: 实时推送
-    T2-->>A: 查询结果
-
-    A->>M: "正在生成Markdown报告..."
-    M-->>U: 实时推送
-    A-->>S: 任务完成
-    M-->>U: "✅ 报告已生成"
+```json
+{"ok": true, "data": {...}, "evidence": {...}, "confidence": 0.96, "latency_ms": 4120}
 ```
-
-### 数据流
-
-1. 用户 `POST /api/task` 发自然语言请求
-2. 主智能体分析需求，决定调用哪些子智能体
-3. 子智能体各司其职 — 搜网络 / 查数据库 / 翻知识库
-4. 主智能体汇总信息，生成 Markdown 报告（可转 PDF）
-5. 全过程经 WebSocket 实时推送前端
 
 ---
 
-## 🚀 快速开始
-
-### 环境要求
-
-- **Python 3.10+**
-- OpenAI 兼容的 LLM API Key（DeepSeek / 通义千问 / OpenAI 均可）
-- Tavily API Key（[免费注册](https://tavily.com)，每月 1000 次）
-
-> 📌 数据库和 RAGFlow 是可选的，不配也能跑 — 主智能体会自动跳过没有的服务。
-
-### 1. 克隆并安装
+## 快速开始
 
 ```bash
-git clone https://github.com/你的用户名/MultiAgent-Search.git
-cd MultiAgent-Search
+# 1. 环境（依赖见 requirements.txt）
+conda create -n tennis python=3.11 && conda activate tennis
 pip install -r requirements.txt
+
+# 2. 配置模型（OpenAI 兼容协议，DeepSeek / 通义 / OpenAI 均可）
+cp .env.example .env   # 填 OPENAI_API_KEY、OPENAI_BASE_URL、LLM_QWEN_MAX
+
+# 3. 启动
+python -m tennis_coach.api.server     # http://127.0.0.1:8010
 ```
 
-### 2. 配置环境变量
+> `LLM_QWEN_MAX` 是沿用自上游项目的变量名，实际可填任何模型名。
+
+命令行跑单段视频：
 
 ```bash
-cp .env.example .env
+python -m tennis_coach.run_minimal path/to/forehand.mp4
+# 产出 data/runs/<视频名>/：pose.json / metrics.json / annotated.mp4 / keyframes/ / contact_sheet.jpg
 ```
 
-编辑 `.env`，最少填 3 个：
-
-```env
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-LLM_QWEN_MAX=deepseek-chat
-TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxx
-```
-
-### 3. 启动
+评测：
 
 ```bash
-python api/server.py
+python -m tennis_coach.evals.run_eval              # 16 条用例
+python -m tennis_coach.evals.run_eval --repeat 3   # 区分抖动与确定性失败
+python -m tennis_coach.tools.knowledge             # 检索冒烟（hit@1）
 ```
 
-打开浏览器访问 `http://localhost:8000` — 内置调试页面，支持多会话标签页。
+MCP 服务端（可选，供 Claude Desktop / Cursor 调用）：
 
-或者访问 `http://localhost:8000/docs` 用 Swagger 直接调 API。
-
-### 4. 试一试
-
-```bash
-curl -X POST http://localhost:8000/api/task \
-  -H "Content-Type: application/json" \
-  -d '{"query": "搜索最近AI Agent领域的最新进展"}'
-```
-
-WebSocket 实时进度：`ws://localhost:8000/ws/{返回的 thread_id}`
-
-### 🎬 Demo
-
-<!-- TODO: 替换为你的 Demo GIF -->
-![Demo](docs/demo.gif)
-
----
-
-## 📖 你能学到什么
-
-| 知识点 | 项目中的体现 |
-|--------|------------|
-| **Orchestrator 多智能体模式** | `agent/main_agent.py` — 主智能体调度 3 个子智能体 |
-| **Prompt Engineering** | `prompt/prompts.yml` — system_prompt 约束 Agent 行为 |
-| **LangChain @tool 自定义工具** | `tools/` — 8 个工具函数的完整写法 |
-| **FastAPI 异步后台任务** | `api/server.py` — `asyncio.create_task` 非阻塞执行 |
-| **WebSocket 实时推送** | `api/monitor.py` — 工具调用进度实时推前端 |
-| **ContextVar 协程隔离** | `api/context.py` — 多用户并发数据不串台 |
-| **文件操作安全** | `utils/path_utils.py` — 12 种路径场景防护 |
-| **RAG 知识库对接** | `tools/ragflow_tools.py` — RAGFlow SDK 实战 |
-| **NL2SQL 自然语言查库** | `tools/db_tools.py` — Agent 自动写 SQL 执行 |
-| **对话持久化** | `agent/main_agent.py` — SqliteSaver checkpointer |
-
----
-
-## 📁 项目结构
-
-```
-MultiAgent-Search/
-│
-├── agent/                          # 🤖 智能体层（核心）
-│   ├── llm.py                      # 模型初始化（10 行）
-│   ├── prompts.py                  # YAML 提示词加载器
-│   ├── main_agent.py               # ★ 主智能体 + 异步执行引擎
-│   └── subagents/
-│       ├── network_search_agent.py # 网络搜索子智能体
-│       ├── database_query_agent.py # 数据库查询子智能体
-│       └── knowledge_base_agent.py # 知识库子智能体
-│
-├── api/                            # 🌐 Web 接口层
-│   ├── server.py                   # FastAPI 入口 + 路由
-│   ├── context.py                  # ContextVar 协程隔离
-│   ├── monitor.py                  # WebSocket 连接池 + 埋点监控
-│   └── static/
-│       └── index.html              # 前端调试页面
-│
-├── tools/                          # 🔧 工具函数（8 个 @tool）
-│   ├── tavily_tool.py              # 网络搜索（含超时重试）
-│   ├── db_tools.py                 # 数据库查询三件套
-│   ├── ragflow_tools.py            # RAGFlow 知识库检索
-│   ├── markdown_tools.py           # 生成 Markdown
-│   ├── pdf_tools.py                # Markdown → PDF
-│   └── upload_file_read_tool.py    # 读取上传文件
-│
-├── utils/                          # 🛠 工具层
-│   ├── path_utils.py               # 路径安全解析
-│   ├── retry.py                    # 指数退避重试装饰器
-│   └── word_converter.py           # Word COM 引擎
-│
-├── prompt/
-│   └── prompts.yml                 # 提示词配置
-│
-├── data/
-│   └── checkpoints.db              # SQLite 对话持久化
-│
-├── requirements.txt                # 依赖清单（版本锁定）
-├── .env.example                    # 环境变量模板
-├── LICENSE                         # MIT License
-└── README.md
+```json
+{
+  "mcpServers": {
+    "tennis-coach": {
+      "command": "python",
+      "args": ["-m", "tennis_coach.mcp_server"],
+      "cwd": "/path/to/paper_agent"
+    }
+  }
+}
 ```
 
 ---
 
-## 📖 推荐阅读顺序
+## 评测
 
-| 顺序 | 文件 | 重点 |
-|------|------|------|
-| 1️⃣ | `agent/llm.py` | LLM 怎么初始化的（10 行） |
-| 2️⃣ | `prompt/prompts.yml` | system_prompt 怎么写、怎么约束 Agent |
-| 3️⃣ | `agent/subagents/network_search_agent.py` | 最简单的子智能体，理解"子智能体 = 字典配置" |
-| 4️⃣ | `tools/tavily_tool.py` | 完整 @tool 写法，埋点怎么做 |
-| 5️⃣ | `agent/main_agent.py` | **核心** — 主智能体怎么 orchestrate、怎么流式执行 |
-| 6️⃣ | `api/server.py` | FastAPI 怎么和 Agent 结合，异步任务怎么触发 |
-| 7️⃣ | `api/monitor.py` | WebSocket 实时推送，事件循环归属判断 |
-| 8️⃣ | `api/context.py` | ContextVar 为什么比全局变量好 |
-| 9️⃣ | `utils/path_utils.py` | Agent 文件安全 — 边界场景大全 |
+16 条用例，断言**两层轨迹**而不是回答文本：
 
----
+```
+主智能体层：该调度哪个子智能体        → expect_dispatch / forbid
+子智能体层：里面实际调了哪个工具      → expect_tool / forbid_tool
+输出层：  结论是否带依据              → must_contain ["依据"]
+```
 
-## 🧪 练手建议
+| 类型 | 数量 | 内容 |
+|---|---|---|
+| route | 7 | 该调度谁 |
+| boundary | 2 | 越界与工具隔离 |
+| gate | 1 | 该拒答 |
+| scope | 2 | 闲聊/越界不该调度 |
+| clarify | 1 | 缺参数先追问 |
+| multi | 3 | 多轮，共用 thread_id |
 
-项目的设计刻意保持简洁，给你留了很多动手空间：
+```
+单轮 15/16 · 检索 hit@1 13/13
+```
 
-### 入门级（加深理解）
+`tool_isolation_gear` 存在路由抖动（全量跑 1 次失败，单独复跑 3/3 通过），
+属于模型层面的不确定性，已记录而非隐藏。
 
-- [ ] **换个模型**：把 DeepSeek 换成通义千问或 GPT，改 `.env` 一行
-- [ ] **加一个子智能体**：比如"天气查询助手"，体验加子智能体要改多少行代码
-- [ ] **改 system_prompt**：把"电商运营分析"换成你自己的业务场景
+评测抓到过的真实缺陷：
 
-### 进阶级（工程能力）
-
-- [ ] **加反思机制**：让子智能体执行完后再自我检查，提高准确性
-- [ ] **加 JWT 认证**：给 `/api/task` 加上登录校验
-- [ ] **给子智能体加通信**：让数据库和搜索子智能体互相交换信息
-
-### 挑战级（深入学习）
-
-- [ ] **WeasyPrint 替代 Word COM**：摆脱 Windows 依赖，Linux 也能跑 PDF 转换
-- [ ] **人工审批节点**：敏感操作需用户确认才执行（LangGraph interrupt）
-- [ ] **Docker 化**：写 Dockerfile + docker-compose，一键启动
+1. **门禁误伤**：`evaluate()` 对所有工具生效，装备推荐被当成"零击球"拒掉
+2. **单项被拒后整轮终止**："分析视频 + 选球拍"里视频被拒后，选球拍那半句被丢了
+3. **关键词假通过**：检索返回空，模型凭记忆答对了关键词，用例照样通过 —— 直到断言"必须带依据"才暴露
 
 ---
 
-## 🔧 技术栈
+## 设计取舍
 
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| Agent 框架 | deepagents (LangChain 官方) | 多智能体编排 |
-| 图编排 | LangGraph + SqliteSaver | 状态图 + 对话持久化 |
-| LLM 接入 | LangChain + OpenAI 兼容协议 | 一套代码适配多种模型 |
-| Web 框架 | FastAPI + Uvicorn | 异步 HTTP + 原生 WebSocket |
-| 搜索引擎 | Tavily API | AI 专用搜索，免费额度 |
-| 知识库 | RAGFlow | 开源 RAG 引擎 |
-| 数据库 | MySQL | Agent 自动写 SQL |
-| 文档生成 | markdown + WeasyPrint | MD 生成 + PDF 转换 |
+**① 推理能进代码就不要留给 Prompt**
+短板判定由代码按 CV 排名，模型只能执行；质量门禁的拒答文案是确定性字符串，不经过模型。CoT 依赖模型愿意好好想，代码不依赖。
 
----
+**② 结构限制优先于 Prompt 约束**
+子智能体拿到历史视频路径后会"顺手"重跑分析、导致重复记账。修法不是加 prompt 规则，而是让返回值里只给文件名——**先让错误路径走不通，再补话术**。
 
-## ❓ FAQ
-
-### Q: 为什么选 deepagents？
-
-**A:** 自己写编排要处理状态管理、tool_call 路由、流式输出、错误恢复等一堆事。`deepagents` 封装好了，你只需定义子智能体的 name / description / tools，框架帮你调度。先理解"用框架能做什么"，再看源码"框架怎么做的"。
-
-### Q: 没有 RAGFlow 和 MySQL 能跑吗？
-
-**A:** 能。主智能体会自动判断可用服务并跳过，只配 LLM + Tavily 就能体验完整链路。这就是刻意设计的"优雅降级"。
-
-### Q: 为什么用 ContextVar 而不是全局变量？
-
-**A:** FastAPI 下多个请求跑在同一线程的不同协程里。用全局变量的话，用户 A 的数据会被用户 B 覆盖（串台）。ContextVar 是 asyncio 原生支持的协程级变量，每个请求链路互不干扰。
-
-### Q: 项目为什么不到 1000 行？
-
-**A:** 故意的。学习项目，不是生产项目。每个模块只做一件事，代码少才容易看懂。把这 1000 行读明白，多智能体 Agent 的核心概念就掌握了。
+**③ 判断"不该做"也是技术判断**
+- 装备顾问换便宜模型：15 条用例全过、快 12%，但 1/6 会把"无匹配"说成"工具异常"并编造市场价 → 用数据否掉，回退
+- MCP 全量迁移：工具是自有业务逻辑，序列化 + 长任务超时的代价换不来功能 → 只保留对外服务端
 
 ---
 
-## 📄 License
+## 已知局限
 
-MIT License — 随意使用、修改、分发。基于本项目做了有趣的东西，欢迎提 PR 😄
+| 局限 | 说明 |
+|---|---|
+| 指标区分度未验证 | 击球计数与人工核对一致（8 次），但"好动作 vs 坏动作"缺标注集 |
+| 跨人对比无意义 | 指标未做人体尺度校准，不同人的绝对值不可横向比较 |
+| 2D 单目 | `contact_offset` 丢失朝向纵深分量，侧视角下信息量偏低 |
+| `pose_landmarker_full` 反而更差 | 同段视频 6 次 vs lite 的 8 次，抖动更大，固定用 lite |
+| MCP 只覆盖 CLI | Web 服务仍用进程内工具，每次调用新起进程（约 2.5s） |
+| `user_id` 不是认证 | 由客户端提供、服务端信任，多租户场景下可伪造 |
+| 语料与装备为示例级 | 43 条知识、8 款球拍，非权威来源与真实 catalogue |
+
+每一条都可以在面试里展开成"我知道边界在哪、下一步做什么"。
+
+---
+
+## 目录结构
+
+```
+tennis_coach/
+├── core/          ToolResult 契约 / 上下文压缩 / 质量门禁 / SQLite 记忆
+├── pose/          关键点提取 / 指标计算 / 可视化
+├── tools/         5 个 @tool
+├── knowledge/     43 条知识库
+├── agent/         最小 ReAct 图 / 多智能体编排 / 事件流 / MCP 客户端
+├── evals/         16 条用例 + 轨迹断言
+├── api/           FastAPI + WebSocket + 对话式前端
+└── mcp_server.py  MCP 服务端（5 工具，stdio）
+```
+
+设计笔记见 [`docs/Tennis-Agent-七阶段笔记.md`](docs/Tennis-Agent-七阶段笔记.md)。
+
+---
+
+## 来源与许可
+
+架构范式参考开源项目 [MultiAgent-Search](https://github.com/jayergood/MultiAgent-Search)（星型多智能体、子智能体作为工具）。
+
+**业务层为原创实现**：视频分析管线、动作指标、质量门禁、跨会话记忆、知识检索、回归评测、Web 服务与 MCP 封装。
+
+姿态模型为 [MediaPipe Pose Landmarker](https://developers.google.com/mediapipe/solutions/vision/pose_landmarker)（Apache 2.0）。

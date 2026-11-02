@@ -109,6 +109,12 @@ class ToolMonitor:
         """报告工具开始执行"""
         self._emit("tool_start", f"开始执行工具: {tool_name}", {"tool_name": tool_name, "args": args})
 
+    def report_tool_result(self, tool_name: str, status: str = "success"):
+        """报告工具执行结束（status: success / error）"""
+        label = "执行完成" if status == "success" else "执行失败"
+        self._emit("tool_result", f"工具{label}: {tool_name}",
+                   {"tool_name": tool_name, "status": status})
+
     def report_assistant(self, assistant_name: str, args: Dict[str, Any] = None):
         """报告正在调用的子智能体进度"""
         self._emit("assistant_call", f"正在调用助手: {assistant_name}",
@@ -121,6 +127,10 @@ class ToolMonitor:
     def report_session_dir(self, path: str):
         """报告任务工作目录"""
         self._emit("session_created", f"工作目录已创建: {path}", {"path": path})
+
+    def report_error(self, message: str, data: Dict[str, Any] = None):
+        """报告任务执行异常（message 由调用方组织，便于附带错误码）"""
+        self._emit("error", message, data)
 
 
 # 全局单例实例

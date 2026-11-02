@@ -1,8 +1,9 @@
 from agent.subagents.knowledge_base_agent import knowledge_base_agent
 from agent.subagents.database_query_agent import database_query_agent
 from agent.subagents.network_search_agent import network_search_agent
-from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
+from agent.subagents.weather_agent import weather_agent
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 # main_agent tool导入
 from tools.markdown_tools import generate_markdown
@@ -16,32 +17,50 @@ from agent.prompts import main_agent_content
 
 from api.monitor import monitor
 import asyncio
+import logging
 import uuid
 import shutil
 from pathlib import Path
 
 from api.context import set_session_context, reset_session_context, set_thread_context
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import ToolMessage
+
+logger = logging.getLogger(__name__)
 
 # 持久化 checkpoint：使用 SQLite 替代内存存储
 # 服务重启后对话历史不丢失，支持多轮对话上下文
 checkpoint_db_path = Path(__file__).parents[1] / "data" / "checkpoints.db"
 checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
-_conn = sqlite3.connect(str(checkpoint_db_path), check_same_thread=False)
-checkpointer = SqliteSaver(_conn)
 
-main_agent = create_deep_agent(
-   model = model,
-   system_prompt=main_agent_content['system_prompt'],
-   tools= [generate_markdown,convert_md_to_pdf,read_file_content],
-   checkpointer=checkpointer,
-   subagents=[
-       database_query_agent,
-       network_search_agent,
-       knowledge_base_agent
-   ]
-)
+# run_deep_agent 使用 astream（异步），因此必须用 AsyncSqliteSaver：
+# 同步 SqliteSaver 不支持异步方法。AsyncSqliteSaver 依赖 aiosqlite 连接，
+# 且连接必须在事件循环内创建，所以主智能体改为首次调用时懒加载。
+_agent_instance = None
+_agent_lock = asyncio.Lock()
+
+
+async def get_main_agent():
+    """首次调用时创建主智能体，之后复用同一实例。"""
+    global _agent_instance
+    if _agent_instance is not None:
+        return _agent_instance
+    async with _agent_lock:
+        if _agent_instance is None:
+            conn = await aiosqlite.connect(str(checkpoint_db_path))
+            _agent_instance = create_deep_agent(
+                model=model,
+                system_prompt=main_agent_content['system_prompt'],
+                tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+                checkpointer=AsyncSqliteSaver(conn),
+                subagents=[
+                    database_query_agent,
+                    network_search_agent,
+                    knowledge_base_agent,
+                    weather_agent,
+                ],
+            )
+    return _agent_instance
 
 # 执行
 """
@@ -73,6 +92,8 @@ async def run_deep_agent(task_query,session_id):
     # project_root_path / output / session_session_id(uuid)
     # 当前会话存储生成文件的专属文件夹
     session_dir = project_root_path / "output" / f"session_{session_id}"
+    # 目录已存在说明是本会话的后续请求，工作环境指令无需重复注入
+    is_first_turn = not session_dir.exists()
     # 文件夹可能没有，第一次请求要创建
     session_dir.mkdir(parents=True, exist_ok=True)
     # \  \n \t -> /
@@ -113,7 +134,11 @@ async def run_deep_agent(task_query,session_id):
     }
 
     # 构建提示词
-    path_instruction = f"""
+    # 工作环境指令只在首轮注入：会话目录固定不变，后续轮次靠 checkpoint 中的历史即可，
+    # 避免每轮重复写入 SQLite 造成 token 浪费。有新上传文件时仍需补一次。
+    path_instruction = ""
+    if is_first_turn or updated_info_prompt:
+        path_instruction = f"""
     【工作环境指令】
     工作目录: {relative_session_dir_str}
     {updated_info_prompt}
@@ -126,8 +151,10 @@ async def run_deep_agent(task_query,session_id):
     """
     # 反馈结果
     try:
+        # 获取（或首次创建）主智能体实例
+        agent = await get_main_agent()
         # 执行
-        async for chunk in main_agent.astream({
+        async for chunk in agent.astream({
             "messages":[
                 {
                     "role":"user","content":task_query+path_instruction
@@ -142,28 +169,35 @@ async def run_deep_agent(task_query,session_id):
                     last_msg = messages[-1]
                     if node_name == 'model':
                         if last_msg.tool_calls:
-                            # 工具和子智能体
+                            # 本轮是「决定调用」，不是最终答案。
+                            # deepagents 把子智能体统一包装成 task 工具，
+                            # args.subagent_type 即子智能体的 name。
                             for tool_call in last_msg.tool_calls:
-                                """
-                                  tool_call = {
-                                      name: task
-                                      args:{
-                                          subagent_type:子智能体的名字
-                                          description:子智能体的描述
-                                      }
-                                  }                                
-                                """
                                 if tool_call['name'] == 'task':
-                                    # 调用某个子智能体
-                                    monitor.report_assistant(tool_call['args']['subagent_type'],{'description':tool_call['args']['description']})
-                        elif last_msg.content:
-                            # 最终结果
-                            print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
-                            monitor.report_task_result(last_msg.content)
+                                    monitor.report_assistant(
+                                        tool_call['args']['subagent_type'],
+                                        {'description': tool_call['args']['description']}
+                                    )
+                        else:
+                            # 必须用 else 而不是独立 if：部分模型会在返回 tool_calls 的同时
+                            # 输出解说性 content，若当成最终结果推送，前端会提前把会话标记为 done。
+                            if last_msg.content:
+                                print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
+                                monitor.report_task_result(last_msg.content)
+                    elif node_name == 'tools':
+                        # 工具执行结束。ToolMessage.name 是工具名，
+                        # 'task' 代表子智能体调度的回填结果，已由 assistant_call 上报，且体积可能很大，跳过。
+                        tool_name = getattr(last_msg, 'name', None)
+                        if tool_name and tool_name != 'task':
+                            monitor.report_tool_result(tool_name, getattr(last_msg, 'status', 'success'))
 
     except Exception as e :
-        # 报错推送错误信息给前端
-        monitor._emit("error",f"执行主智能发生异常信息：{str(e)}")
+        # 生成错误码，方便用户报障时按码检索日志
+        error_id = uuid.uuid4().hex[:8]
+        # 服务端保留完整堆栈，便于定位问题
+        logger.exception("主智能体执行异常 trace=%s session_id=%s", error_id, session_id)
+        # 前端只收摘要，避免把服务器堆栈暴露给用户
+        monitor.report_error(f"任务执行失败（错误码 {error_id}）：{type(e).__name__}: {e}")
     finally:
         # 释放存储的地址和session_id
         reset_session_context(session_dir_token, session_id_token)

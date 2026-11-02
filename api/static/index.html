@@ -216,6 +216,7 @@ const tagMap = {
   session_created: { dot:'s', tag:'s', text:'会话' },
   assistant_call:  { dot:'a', tag:'a', text:'调度' },
   tool_start:      { dot:'t', tag:'t', text:'工具' },
+  tool_result:     { dot:'t', tag:'t', text:'工具' },
   task_result:     { dot:'r', tag:'r', text:'完成' },
   error:           { dot:'e', tag:'e', text:'错误' },
 };
@@ -401,7 +402,7 @@ function scheduleFileRefresh() {
 async function refreshFiles() {
   const list = $('#fileList');
   try {
-    const res = await fetch('/api/files');
+    const res = await fetch(`/api/files?thread_id=${encodeURIComponent(activeSessionId || '')}`);
     const d = await res.json();
     if (d.error || !d.files || d.files.length === 0) {
       list.innerHTML = `<div class="empty-state"><div class="icon">📂</div><div>还未生成文件</div></div>`;

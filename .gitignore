@@ -47,3 +47,19 @@ tools/test_session_*/
 # ========================
 .DS_Store
 Thumbs.db
+
+# ========================
+# 第三方大文件（508M：yolo 权重、样例视频、嵌套 .git）
+# 只保留姿态模型，其余靠文档说明自行下载
+# ========================
+third_party/*
+!third_party/models/
+third_party/models/*
+!third_party/models/pose_landmarker_lite.task
+!third_party/models/pose_landmarker_full.task
+
+# 本地临时探测文件
+.node_probe
+
+# 原始项目的个人学习笔记（不想公开就保持忽略）
+学习笔记-MultiAgent-Search.md

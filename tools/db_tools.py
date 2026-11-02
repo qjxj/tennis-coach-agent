@@ -1,4 +1,5 @@
 import os
+from typing import Annotated
 from dotenv import load_dotenv
 from api.monitor import monitor
 from mysql.connector import connect, Error
@@ -36,9 +37,9 @@ def get_db_config():
 @tool
 def list_sql_tables()->str:
     """
-    查询当前库中所有可用的表！
-    作用：为了模型识别有哪些可用的表！方便进行后续的自定义sql查询
-    :return: 有表： 可用的表有：表1,表2,表3....  没有表: 没有可用的表   出现异常：查询出现异常：异常信息
+    查询当前数据库中所有可用的表，返回表名列表。
+
+    作用：让模型先了解有哪些表，再进行后续的自定义 SQL 查询。
     """
 
     # 埋点,调用工具了告诉前端哪个工具被调用了！！
@@ -72,22 +73,15 @@ def list_sql_tables()->str:
 
 
 @tool
-def get_table_data(table_name)->str:
+def get_table_data(
+    table_name: Annotated[str, "表名，必须是 list_sql_tables 返回过的表"],
+)->str:
     """
-    查询指定表名的数据！当前工具调用之前，必须先调用list_sql_tables完成表名的校验！
-    此工具的作用：1.可以完成单表数据的查询 2. 可以为多表查询提供表结果信息（列名&数据格式）
-    :param table_name: 表名
-    :return: csv格式的数据（模拟表格数据格式）
-             1.第一行是列信息，列之间使用,（英文的逗号）分割
-             2.第二行开始是表数据，值之间也使用,(英文的逗号)分割
-             3.行和行之间使用\n分割
-             4.至多表数据查询100条
-             例如：
-                id,name,age\n -> 列头
-                1,张三,18\n
-                1,张三,18\n    -> 至多查询100条
-                1,张三,18\n
-                1,张三,18\n
+    查询指定表的数据（至多 100 条），返回 CSV 格式：第一行是列名，其后每行是一条记录，
+    列之间用英文逗号分隔，行之间用换行符分隔。
+
+    调用前必须先调用 list_sql_tables 确认表名。可用于单表数据查询，
+    也可用于了解列名与数据格式，为多表 SQL 查询做准备。
     """
     # 埋点,调用工具了告诉前端哪个工具被调用了！！
     monitor.report_tool(tool_name="数据库表数据查询工具：get_table_data", args={"table_name":table_name})
@@ -138,22 +132,14 @@ def get_table_data(table_name)->str:
 
 
 @tool
-def execute_sql_query(query)->str:
+def execute_sql_query(
+    query: Annotated[str, "要执行的自定义查询 SQL 语句"],
+)->str:
     """
-    执行自定义查询sql语句！切记：执行之前，需要通过执行 list_sql_tables明确表名！执行get_table_data
-    明确表结构和数据格式！
-    :param query: 要执行的自定义sql语句
-    :return: csv格式的数据（模拟表格数据格式）
-             1.第一行是列信息，列之间使用,（英文的逗号）分割
-             2.第二行开始是表数据，值之间也使用,(英文的逗号)分割
-             3.行和行之间使用\n分割
-             4.至多表数据查询100条
-             例如：
-                id,name,age\n -> 列头
-                1,张三,18\n
-                1,张三,18\n    -> 至多查询100条
-                1,张三,18\n
-                1,张三,18\n
+    执行自定义查询 SQL，返回 CSV 格式数据（至多 100 条）：第一行是列名，
+    其后每行是一条记录，列之间用英文逗号分隔，行之间用换行符分隔。
+
+    执行前应先调用 list_sql_tables 确认表名，必要时用 get_table_data 了解字段结构。
     """
     # 埋点,调用工具了告诉前端哪个工具被调用了！！
     monitor.report_tool(tool_name="数据库表数据查询工具：execute_sql_query", args={"query":query})

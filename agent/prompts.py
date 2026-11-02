@@ -1,5 +1,5 @@
 # 目标加载yml中的数据，供创建主和子智能体使用
-import yaml # yaml配置文件读取
+import yaml # yaml配置文件读取，约束行为，
 from pathlib import Path
 
 # 定义一个加载函数，配置文件yaml加载成字典
@@ -9,7 +9,7 @@ def load_yaml(file_path):
     :param file_path:  加载的文件的地址
     :return:  返回的加载结果 本质就是字典
     """
-    with open(file_path, 'r', encoding='utf-8') as f :
+    with open(file_path, 'r', encoding='utf-8') as f :#encoding=’utf-8是因为我们的的prompt全是中文
         # safe_load 只会加载，不会触发！
         # load 加载过程中可能无意执行内部的嵌入函数！！ 可能发生注入脚本攻击
         return yaml.safe_load(f)
@@ -28,3 +28,13 @@ main_agent_content = prompt_yaml_content["main_agent"]
 
 # sub_agents_content
 sub_agents_content = prompt_yaml_content["sub_agents"]
+'''
+{
+  "main_agent": {"system_prompt": "..."},
+  "sub_agents": {
+    "tavily":  {"name": ..., "description": ..., "system_prompt": ...},
+    "db":      {"name": ..., "description": ..., "system_prompt": ...},
+    "ragflow": {"name": ..., "description": ..., "system_prompt": ...},
+  }
+}
+'''

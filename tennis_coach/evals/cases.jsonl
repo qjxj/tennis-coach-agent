@@ -1,0 +1,16 @@
+{"id":"gear_basic","type":"route","query":"预算1000元，初学者，想要控制好的球拍","expect_dispatch":["装备顾问"],"forbid":["技术分析师"],"expect_tool":["filter_rackets"]}
+{"id":"gear_arm","type":"route","query":"我手肘不太好，预算1200，中级水平，帮我选个拍子","expect_dispatch":["装备顾问"],"forbid":["技术分析师"],"must_contain":["肘"],"expect_tool":["filter_rackets"]}
+{"id":"gear_no_match","type":"boundary","query":"预算200元，高级水平，推荐网球拍","expect_dispatch":["装备顾问"],"must_contain_any":["没有","无匹配","放宽","不足"],"expect_tool":["filter_rackets"]}
+{"id":"stroke_bad_video","type":"gate","query":"third_party/tennis-tracking/VideoInput/video_input3.mp4 这段正手帮我看看","expect_dispatch":["技术分析师"],"expect_refuse":true,"expect_tool":["analyze_stroke"]}
+{"id":"stroke_vs_gear","type":"route","query":"third_party/tennis-tracking/VideoInput/video_input3.mp4 帮我分析这段正手；另外再推荐一个千元内的球拍","expect_dispatch":["技术分析师","装备顾问"],"expect_tool":["analyze_stroke","filter_rackets"]}
+{"id":"chitchat","type":"scope","query":"你好，你能做什么","expect_no_dispatch":true}
+{"id":"out_of_scope","type":"scope","query":"帮我订一张去上海的机票","expect_no_dispatch":true}
+{"id":"missing_params","type":"clarify","query":"推荐个网球拍吧","must_contain_any":["预算","水平","新手","初学"],"forbid_tool":["filter_rackets"]}
+{"id":"progress_route","type":"route","query":"我最近一个月有没有进步？帮我对比一下","expect_dispatch":["技术分析师"],"forbid":["装备顾问"],"expect_tool":["get_progress"]}
+{"id":"plan_route","type":"route","query":"帮我制定一个四周的训练计划，我该先练什么？","expect_dispatch":["技术分析师"],"forbid":["装备顾问"],"expect_tool":["make_training_plan"]}
+{"id":"knowledge_route","type":"route","query":"正手击球点到底应该在身体的什么位置？","expect_dispatch":["技术分析师"],"forbid":["装备顾问"],"expect_tool":["search_technique"],"forbid_tool":["analyze_stroke"]}
+{"id":"tool_isolation_gear","type":"boundary","query":"预算800，中级，帮我挑个拍子","expect_dispatch":["装备顾问"],"forbid_tool":["analyze_stroke","get_progress","search_technique"]}
+{"id":"multi_turn_clarify","type":"multi","turns":["帮我推荐个网球拍","预算1000，初学者，手肘有点不舒服"],"expect_dispatch":["装备顾问"],"expect_tool":["filter_rackets"],"must_contain_any":["肘"]}
+{"id":"multi_turn_followup","type":"multi","turns":["正手击球点应该在身体的什么位置？","那随挥呢？"],"expect_dispatch":["技术分析师"],"expect_tool":["search_technique"]}
+{"id":"multi_turn_no_repeat","type":"multi","turns":["你好，你能做什么","那你能推荐球拍吗"],"expect_no_dispatch":true}
+{"id":"rule_route","type":"route","query":"抢七要打到几分才算赢？","expect_dispatch":["技术分析师"],"expect_tool":["search_technique"],"must_contain_any":["7","七"],"must_contain":["依据"]}

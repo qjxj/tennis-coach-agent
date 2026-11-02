@@ -8,15 +8,15 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import uuid
 import asyncio
+import re
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
 from pydantic import BaseModel
 from typing import List
-import shutil
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -39,13 +39,35 @@ output_dir.mkdir(exist_ok=True)
 updated_dir = project_root / "updated"
 updated_dir.mkdir(exist_ok=True)
 
+# 单个上传文件大小上限（字节）
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+# thread_id 只允许字母、数字、下划线、连字符，长度 1~64
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_session_dir(base: Path, thread_id: str) -> Path:
+    """校验 thread_id 并返回 base/session_{id} 的绝对路径，防止目录穿越。"""
+    if not _THREAD_ID_RE.fullmatch(thread_id or ""):
+        raise HTTPException(status_code=400, detail="非法 thread_id")
+    return (base / f"session_{thread_id}").resolve()
+
+
+def _safe_upload_name(raw_name: str) -> str:
+    """只保留文件名部分，丢掉客户端传来的任何目录成分（含 ../ 与反斜杠）。"""
+    name = Path((raw_name or "").replace("\\", "/")).name
+    if not name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail=f"非法文件名: {raw_name}")
+    return name
+
 # 挂载静态文件目录 (前端调试页面)
 static_dir = current_dir / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", FastAPIStaticFiles(directory=str(static_dir)), name="static")
 
-# 挂载输出目录 (前端可直接访问生成的文件)
-app.mount("/output", FastAPIStaticFiles(directory=str(output_dir)), name="output")
+# 注意：不再用 StaticFiles 挂载 /output。
+# 静态挂载等于给文件开了第二个入口，会绕过 /api/download 的目录校验；
+# 生成文件统一走 /api/download（前端已按此方式下载）。
 
 # 首页
 @app.get("/", response_class=HTMLResponse)
@@ -56,11 +78,13 @@ async def root():
     return "<h1>MultiAgent-Search API</h1><p>访问 <a href='/docs'>/docs</a> 查看 API 文档</p>"
 
 # 配置 CORS
+# 不能用 ["*"] + allow_credentials=True：Starlette 会回显请求方 Origin，
+# 效果是任何站点都能带凭证调用本服务（CSRF 风险）。这里只放行本机调试页。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 class TaskRequest(BaseModel):
@@ -105,19 +129,32 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
         files (List[UploadFile]): 文件对象列表。
         thread_id (str): 关联的任务会话 ID。
     """
-    # 1. [目录准备] 确保上传目录存在
-    target_dir = updated_dir / f"session_{thread_id}"
+    # 1. [目录准备] 校验 thread_id，防止 session_{id} 被拼出 ../ 逃逸
+    target_dir = _safe_session_dir(updated_dir, thread_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files = []
     # 2. [保存] 遍历并写入文件
     for file in files:
-        file_path = target_dir / file.filename
+        # 只取 basename：客户端可伪造 "../../etc/cron.d/x" 这类 filename
+        safe_name = _safe_upload_name(file.filename)
+        file_path = target_dir / safe_name
+
+        written = 0
         # 使用二进制模式写入，支持各种文件格式 (图片、PDF、文本等)
-        # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
+        # 分块写入，既能处理大文件，又能在超限时及时中断
         with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file.filename)
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    buffer.close()
+                    file_path.unlink(missing_ok=True)  # 清理写了一半的残文件
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件超过大小上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB: {safe_name}",
+                    )
+                buffer.write(chunk)
+        saved_files.append(safe_name)
 
     # 3. [响应] 返回成功保存的文件列表
     return {"status": "uploaded", "files": saved_files}
@@ -139,57 +176,63 @@ async def download_file(path: str):
     try:
         abs_path = Path(path).resolve()
         output_abs = output_dir.resolve()
-
-        # 必须确保请求的文件在 output 目录下
-        if not abs_path.is_relative_to(output_abs):
-            return {"error": "拒绝访问: 只能下载输出目录下的文件"}
     except Exception:
-        return {"error": "无效的路径参数"}
+        raise HTTPException(status_code=400, detail="无效的路径参数")
+
+    # 必须确保请求的文件在 output 目录下
+    if not abs_path.is_relative_to(output_abs):
+        raise HTTPException(status_code=403, detail="拒绝访问: 只能下载输出目录下的文件")
+
     # 2. [存在性检查]
-    if not abs_path.exists():
-        return {"error": "文件不存在"}
+    if not abs_path.exists() or not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
 
     # 3. [响应] 返回文件流 (浏览器自动触发下载)
     return FileResponse(abs_path, filename=abs_path.name)
 
 
 @app.get("/api/files")
-async def list_files(path: str = None):
+async def list_files(thread_id: str = None, path: str = None):
     """
     文件列表查询接口 (File Explorer)。
 
     目标：
-    1. 列出指定目录下的所有生成文件。
-    2. 提供文件元数据（大小、时间、下载链接）。
+    1. 列出**当前会话**生成的文件（会话隔离）。
+    2. 提供文件元数据（大小、时间）。
     3. 严格的安全检查，防止路径遍历攻击。
 
     Args:
-        path (str): 目标目录的绝对路径 (必须在 output 目录下)。不传则默认使用 output 目录。
+        thread_id (str): 会话 ID。传了就只看 output/session_{thread_id} 下的文件。
+        path (str): 兼容用的显式目录（必须位于 output 下）。
+    不传 thread_id 也不传 path 时返回空列表，避免默认暴露整个 output 目录。
     """
-    # 默认使用 output 目录
-    if path is None:
-        path = str(output_dir)
+    if thread_id:
+        # 会话隔离：thread_id 已做格式校验，路径被收敛到单个 session 目录
+        abs_path = _safe_session_dir(output_dir, thread_id)
+        if not abs_path.exists():
+            # 新会话还没生成过文件，属于正常情况，不报错
+            return {"files": []}
+    elif path:
+        try:
+            # [解析] 获取绝对路径对象
+            abs_path = Path(path).resolve()
+            output_abs = output_dir.resolve()
+        except Exception as e:
+            print(f"[ERROR] 路径解析失败: {e}")
+            raise HTTPException(status_code=400, detail=f"路径无效: {e}")
 
-    # 1. [调试] 打印请求路径
-    print(f"[DEBUG] 请求文件列表: {path}")
-
-    try:
-        # 2. [解析] 获取绝对路径对象
-        abs_path = Path(path).resolve()
-        output_abs = output_dir.resolve()
-
-        # 3. [安全] 检查路径是否越界 (Path Traversal Check)
+        # [安全] 检查路径是否越界 (Path Traversal Check)
         if not abs_path.is_relative_to(output_abs):
             print(f"[ERROR] 拒绝访问: {abs_path} 不在 {output_abs} 目录下")
-            return {"error": "拒绝访问: 只能访问输出目录下的文件"}
+            raise HTTPException(status_code=403, detail="拒绝访问: 只能访问输出目录下的文件")
 
-    except Exception as e:
-        print(f"[ERROR] 路径解析失败: {e}")
-        return {"error": f"路径无效: {e}"}
+        if not abs_path.exists():
+            raise HTTPException(status_code=404, detail="目录不存在")
+    else:
+        # 不指定会话就不返回任何文件，杜绝“默认全量列举”
+        return {"files": []}
 
-    # 4. [检查] 目录是否存在
-    if not abs_path.exists():
-        return {"error": "目录不存在"}
+    print(f"[DEBUG] 请求文件列表: {abs_path}")
 
     files = []
     try:
@@ -269,4 +312,8 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         manager.disconnect(websocket, thread_id)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    # 默认只监听本机，避免同网段任何人直接访问调试接口与文件接口。
+    # 需要局域网访问时显式设置 HOST=0.0.0.0（并自行确认鉴权与 CORS 配置）。
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port, reload=False)
